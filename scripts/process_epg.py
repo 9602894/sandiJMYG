@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 import os
 import gzip
 from urllib.parse import quote
+import re
 
 def safe_download(url):
     try:
@@ -29,66 +30,95 @@ def fix_display_name(root):
             if name.text:
                 name.text = name.text.strip()
 
-def merge_with_priority(contents):
+def normalize_channel_name(name):
+    """归一化频道名称：去除后缀（高清、HD、标清、-等），保留核心名称"""
+    if not name:
+        return name
+    # 去除末尾的常见修饰词（支持中文和英文）
+    name = re.sub(r'[\s\-_]+(高清|HD|标清|高标清|付费|测试)$', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'(高清|HD|标清|高标清|付费|测试)[\s\-_]*$', '', name, flags=re.IGNORECASE)
+    # 去除末尾可能的空格或连字符
+    name = name.strip()
+    return name
+
+def merge_and_deduplicate(contents):
     """
-    合并EPG，以第一个源（CN）为主：
-    - 保留CN的所有频道和节目
-    - 对于其他源，只添加频道id不在CN中的频道的节目
+    对所有源进行频道归一化去重，然后合并所有节目并去重
     """
-    print("🔄 按优先级合并EPG（CN优先）...")
+    print("🔄 合并所有EPG数据，先归一化频道名称...")
     merged_root = ET.Element('tv')
-    merged_root.set('source-info-name', 'JMYG EPG (CN优先)')
-    merged_root.set('generator-info-name', 'JMYG Merger')
+    merged_root.set('source-info-name', 'JMYG Merged EPG')
+    merged_root.set('generator-info-name', 'JMYG Deduper')
 
-    # 先处理CN（第一个源）
-    cn_name, cn_content = contents[0]
-    cn_root = ET.fromstring(cn_content)
-    fix_icon_url(cn_root)
-    fix_display_name(cn_root)
+    # 用于存储：归一化名称 -> 首选频道元素（按源顺序，CN优先）
+    norm_to_channel = {}
+    # 用于存储：原始频道ID -> 首选频道ID
+    id_to_preferred = {}
+    # 用于统计
+    total_channels_original = 0
+    total_channels_normalized = 0
 
-    cn_channel_ids = set()
-    for ch in cn_root.findall('channel'):
-        cid = ch.get('id')
-        if cid:
-            cn_channel_ids.add(cid)
-            merged_root.append(ch)   # 添加CN频道
-
-    # 添加CN的节目
-    cn_prog_count = 0
-    for prog in cn_root.findall('programme'):
-        merged_root.append(prog)
-        cn_prog_count += 1
-    print(f"✅ CN 频道数: {len(cn_channel_ids)}, 节目数: {cn_prog_count}")
-
-    # 处理其他源
-    for src_name, src_content in contents[1:]:
+    # 第一步：遍历所有源，收集频道并建立映射
+    for src_name, content in contents:
         try:
-            src_root = ET.fromstring(src_content)
-            fix_icon_url(src_root)
-            fix_display_name(src_root)
-
-            # 收集该源中CN没有的频道
-            new_channel_ids = set()
-            for ch in src_root.findall('channel'):
+            root = ET.fromstring(content)
+            fix_icon_url(root)
+            fix_display_name(root)
+            for ch in root.findall('channel'):
                 cid = ch.get('id')
-                if cid and cid not in cn_channel_ids:
-                    merged_root.append(ch)
-                    new_channel_ids.add(cid)
-
-            # 添加这些新频道的节目
-            added_progs = 0
-            for prog in src_root.findall('programme'):
-                ch_id = prog.get('channel')
-                if ch_id and ch_id in new_channel_ids:
-                    merged_root.append(prog)
-                    added_progs += 1
-            print(f"✅ {src_name} 新增频道数: {len(new_channel_ids)}, 新增节目数: {added_progs}")
+                if not cid:
+                    continue
+                total_channels_original += 1
+                # 获取频道名称（取第一个display-name）
+                name_elem = ch.find('display-name')
+                raw_name = name_elem.text.strip() if name_elem is not None and name_elem.text else cid
+                norm_name = normalize_channel_name(raw_name)
+                # 如果该归一化名称尚未出现，则作为首选
+                if norm_name not in norm_to_channel:
+                    norm_to_channel[norm_name] = ch
+                    # 记录原始ID到首选ID的映射（首选ID即当前频道的ID）
+                    id_to_preferred[cid] = cid
+                else:
+                    # 如果已存在，记录映射到首选ID
+                    preferred_ch = norm_to_channel[norm_name]
+                    preferred_id = preferred_ch.get('id')
+                    id_to_preferred[cid] = preferred_id
+            print(f"✅ 已读取 {src_name} 原始频道数: {len(root.findall('channel'))}")
         except Exception as e:
             print(f"❌ 处理 {src_name} 出错: {e}")
 
-    # 最终去重（以防万一）
-    total_progs = len(merged_root.findall('programme'))
-    print(f"📊 合并后总节目数: {total_progs}")
+    # 第二步：将归一化后的频道加入merged_root
+    for norm_name, ch in norm_to_channel.items():
+        merged_root.append(ch)
+    total_channels_normalized = len(norm_to_channel)
+    print(f"📊 归一化后频道总数: {total_channels_normalized} (原始总数: {total_channels_original})")
+
+    # 第三步：遍历所有源的节目，将频道ID替换为首选ID，并进行去重
+    seen_progs = set()
+    total_progs_added = 0
+    for src_name, content in contents:
+        try:
+            root = ET.fromstring(content)
+            for prog in root.findall('programme'):
+                orig_id = prog.get('channel')
+                if not orig_id:
+                    continue
+                preferred_id = id_to_preferred.get(orig_id, orig_id)
+                start = prog.get('start', '')
+                end = prog.get('end', '')
+                title_elem = prog.find('title')
+                title = title_elem.text if title_elem is not None and title_elem.text else ''
+                key = (preferred_id, start, end, title.strip())
+                if key not in seen_progs:
+                    prog.set('channel', preferred_id)
+                    merged_root.append(prog)
+                    seen_progs.add(key)
+                    total_progs_added += 1
+            print(f"✅ 已处理 {src_name} 节目")
+        except Exception as e:
+            print(f"❌ 处理 {src_name} 节目时出错: {e}")
+
+    print(f"📊 去重后节目总数: {total_progs_added}")
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(merged_root, encoding='utf-8').decode()
 
 def simple_timezone_fix(xml_content):
@@ -102,7 +132,8 @@ def save_data(content, filename):
         f.write(content)
     with gzip.open(f'epg_data/{filename}.gz', 'wt', encoding='utf-8') as f:
         f.write(content)
-    print(f"💾 已保存: {filename}")
+    size = len(content.encode('utf-8'))
+    print(f"💾 已保存: {filename} ({size/1024/1024:.2f} MB)")
 
 def main():
     print("🚀 开始处理EPG数据...")
@@ -120,11 +151,11 @@ def main():
     if hk: sources.append(('HK', hk))
 
     if sources:
-        merged = merge_with_priority(sources)
+        merged = merge_and_deduplicate(sources)
         save_data(merged, 'epg_merged.xml')
-        # 为了保持接口一致，也生成一个 perfect 文件（与 merged 相同，因为已经以CN为主）
+        # 同样生成一个perfect文件，内容相同
         save_data(merged, 'epg_perfect.xml')
-        print("✅ 生成完成！")
+        print("✅ 处理完成！")
     else:
         print("❌ 所有源下载失败")
 
