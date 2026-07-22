@@ -37,7 +37,7 @@ def fix_display_name(root):
 
 def merge_epg_data(contents):
     """
-    合并多个EPG数据源
+    合并多个EPG数据源（不进行去重）
     contents: list of (source_name, xml_content)
     """
     print("🔄 合并EPG数据...")
@@ -70,6 +70,47 @@ def merge_epg_data(contents):
     
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(merged_root, encoding='utf-8').decode()
 
+def deduplicate_epg(xml_content):
+    """
+    对合并后的EPG进行去重整理
+    - 频道按 id 去重，保留最先出现的
+    - 节目按 (channel, start, end) 去重，保留最先出现的
+    """
+    try:
+        root = ET.fromstring(xml_content)
+        new_root = ET.Element('tv')
+        # 复制根属性
+        for attr, val in root.attrib.items():
+            new_root.set(attr, val)
+        
+        # 去重 channel
+        seen_channels = set()
+        for channel in root.findall('channel'):
+            cid = channel.get('id')
+            if cid and cid not in seen_channels:
+                new_root.append(channel)
+                seen_channels.add(cid)
+        
+        # 去重 programme
+        seen_progs = set()
+        for prog in root.findall('programme'):
+            channel = prog.get('channel')
+            start = prog.get('start')
+            end = prog.get('end')
+            if channel and start and end:
+                key = (channel, start, end)
+                if key not in seen_progs:
+                    new_root.append(prog)
+                    seen_progs.add(key)
+            else:
+                # 若缺少关键字段，仍保留
+                new_root.append(prog)
+        
+        return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(new_root, encoding='utf-8').decode()
+    except Exception as e:
+        print(f"❌ 去重失败: {e}")
+        return xml_content  # 返回原内容
+
 def simple_timezone_fix(xml_content):
     """时区修复为东八区"""
     if xml_content:
@@ -91,7 +132,7 @@ def save_data(content, filename):
 def main():
     print("🚀 开始处理EPG数据...")
     
-    # 下载三个数据源
+    # 下载三个数据源（按优先级顺序：CN 优先）
     raw_cn = safe_download('https://epg.pw/xmltv/epg_CN.xml')
     raw_tw = safe_download('https://epg.pw/xmltv/epg_TW.xml')
     raw_hk = safe_download('https://epg.pw/xmltv/epg_HK.xml')
@@ -101,7 +142,7 @@ def main():
     tw_content = simple_timezone_fix(raw_tw)
     hk_content = simple_timezone_fix(raw_hk)
     
-    # 构建有效源列表
+    # 构建有效源列表（顺序决定去重时的优先级）
     sources = []
     if cn_content:
         sources.append(('CN', cn_content))
@@ -111,13 +152,22 @@ def main():
         sources.append(('HK', hk_content))
     
     if sources:
+        # 1. 生成合并文件（含重复）
         merged_content = merge_epg_data(sources)
         if merged_content:
             save_data(merged_content, 'epg_merged.xml')
             print("✅ EPG数据合并完成！")
+            
+            # 2. 生成去重后的完美文件
+            perfect_content = deduplicate_epg(merged_content)
+            save_data(perfect_content, 'epg_perfect.xml')
+            print("✅ EPG数据去重整理完成，已生成 epg_perfect.xml")
         else:
             print("❌ 合并失败，使用第一个有效源作为备用")
             save_data(sources[0][1], 'epg_merged.xml')
+            # 对备用源也进行去重
+            perfect_content = deduplicate_epg(sources[0][1])
+            save_data(perfect_content, 'epg_perfect.xml')
     else:
         print("❌ 所有数据源下载失败，无法生成EPG")
 
