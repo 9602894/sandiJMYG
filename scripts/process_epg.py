@@ -48,6 +48,7 @@ def merge_epg_data(contents):
     merged_root.set('generator-info-name', 'JMYG EPG Merger')
     
     added_channels = set()
+    total_progs = 0
     
     for source_name, content in contents:
         try:
@@ -63,18 +64,20 @@ def merge_epg_data(contents):
             
             for programme in root.findall('programme'):
                 merged_root.append(programme)
+                total_progs += 1
                 
             print(f"✅ 已合并 {source_name} 数据")
         except Exception as e:
             print(f"❌ 处理 {source_name} 数据时出错: {e}")
     
-    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(merged_root, encoding='utf-8').decode()
+    print(f"📊 合并后总节目数: {total_progs}")
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(merged_root, encoding='utf-8').decode(), total_progs
 
-def deduplicate_epg(xml_content):
+def deduplicate_epg(xml_content, original_count):
     """
     对合并后的EPG进行去重整理
     - 频道按 id 去重，保留最先出现的
-    - 节目按 (channel, start, end) 去重，保留最先出现的
+    - 节目按 (channel, start, end, title) 去重，保留最先出现的
     """
     try:
         root = ET.fromstring(xml_content)
@@ -91,21 +94,28 @@ def deduplicate_epg(xml_content):
                 new_root.append(channel)
                 seen_channels.add(cid)
         
-        # 去重 programme
+        # 去重 programme（使用更严格的键：包含title）
         seen_progs = set()
+        kept_count = 0
         for prog in root.findall('programme'):
             channel = prog.get('channel')
             start = prog.get('start')
             end = prog.get('end')
+            # 获取节目名称（取第一个title）
+            title_elem = prog.find('title')
+            title = title_elem.text if title_elem is not None and title_elem.text else ''
             if channel and start and end:
-                key = (channel, start, end)
+                key = (channel, start, end, title.strip())
                 if key not in seen_progs:
                     new_root.append(prog)
                     seen_progs.add(key)
+                    kept_count += 1
             else:
                 # 若缺少关键字段，仍保留
                 new_root.append(prog)
+                kept_count += 1
         
+        print(f"📊 去重后节目数: {kept_count} (去重前: {original_count}, 减少: {original_count - kept_count})")
         return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(new_root, encoding='utf-8').decode()
     except Exception as e:
         print(f"❌ 去重失败: {e}")
@@ -153,20 +163,22 @@ def main():
     
     if sources:
         # 1. 生成合并文件（含重复）
-        merged_content = merge_epg_data(sources)
+        merged_content, total_progs = merge_epg_data(sources)
         if merged_content:
             save_data(merged_content, 'epg_merged.xml')
             print("✅ EPG数据合并完成！")
             
             # 2. 生成去重后的完美文件
-            perfect_content = deduplicate_epg(merged_content)
+            perfect_content = deduplicate_epg(merged_content, total_progs)
             save_data(perfect_content, 'epg_perfect.xml')
             print("✅ EPG数据去重整理完成，已生成 epg_perfect.xml")
         else:
             print("❌ 合并失败，使用第一个有效源作为备用")
             save_data(sources[0][1], 'epg_merged.xml')
-            # 对备用源也进行去重
-            perfect_content = deduplicate_epg(sources[0][1])
+            # 对备用源也进行去重（先解析统计）
+            temp_root = ET.fromstring(sources[0][1])
+            temp_count = len(temp_root.findall('programme'))
+            perfect_content = deduplicate_epg(sources[0][1], temp_count)
             save_data(perfect_content, 'epg_perfect.xml')
     else:
         print("❌ 所有数据源下载失败，无法生成EPG")
