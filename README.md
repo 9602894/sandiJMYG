@@ -17,3 +17,6 @@ EPG 订阅地址
 https://github.com/9602894/sandiJMYG/blob/main/epg_data/epg_merged.xml
 EPG 订阅地址
 在您的播放器中使用以下订阅地址：https://raw.githubusercontent.com/9602894/sandiJMYG/main/epg_data/epg_merged.xml
+
+
+https://raw.githubusercontent.com/9602894/sandiJMYG/main/epg_data/epg_perfect.xml
