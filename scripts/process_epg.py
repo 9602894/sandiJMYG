@@ -5,6 +5,7 @@ import os
 import gzip
 from urllib.parse import quote
 import re
+import hashlib
 from collections import defaultdict
 
 def safe_download(url):
@@ -35,15 +36,14 @@ def normalize_channel_name(name):
     """强力归一化，去除清晰度、后缀、括号，统一CCTV格式"""
     if not name:
         return name
-    # 去除括号及其内容（包括中文括号）
+    # 去除括号及其内容
     name = re.sub(r'[（(].*?[）)]', '', name)
     name = re.sub(r'[\[【].*?[\]】]', '', name)
     # 统一CCTV格式：CCTV-1 综合、CCTV1、CCTV-1 高清 -> CCTV-1
     name = re.sub(r'CCTV[- ]?(\d+)[ ]?(综合|财经|综艺|体育|电影|电视剧|纪录|科教|戏曲|社会与法|新闻|少儿|音乐|奥林匹克|农业农村|高清)?', r'CCTV-\1', name, flags=re.IGNORECASE)
     name = re.sub(r'CCTV(\d+)', r'CCTV-\1', name, flags=re.IGNORECASE)
-    # 去除末尾常见后缀（高清、HD、标清、付费、测试等）
+    # 去除末尾常见后缀
     name = re.sub(r'[\s\-_]*(高清|HD|标清|高标清|付费|测试)[\s\-_]*$', '', name, flags=re.IGNORECASE)
-    # 去除末尾的 - 或 _
     name = re.sub(r'[\s\-_]+$', '', name)
     return name.strip()
 
@@ -81,10 +81,8 @@ def deduplicate_epg(xml_content):
     new_root.set('generator-info-name', 'JMYG Deduper')
 
     # 1. 频道归一化合并
-    norm_to_channel = {}   # 归一化名称 -> 首选频道元素
-    id_to_preferred = {}   # 原始ID -> 首选ID
-    preferred_channel_ids = set()  # 用于记录首选ID
-
+    norm_to_channel = {}
+    id_to_preferred = {}
     for ch in root.findall('channel'):
         cid = ch.get('id')
         if not cid:
@@ -95,19 +93,15 @@ def deduplicate_epg(xml_content):
         if norm_name not in norm_to_channel:
             norm_to_channel[norm_name] = ch
             id_to_preferred[cid] = cid
-            preferred_channel_ids.add(cid)
         else:
             preferred_ch = norm_to_channel[norm_name]
-            preferred_id = preferred_ch.get('id')
-            id_to_preferred[cid] = preferred_id
+            id_to_preferred[cid] = preferred_ch.get('id')
 
-    # 添加去重后的频道
     for ch in norm_to_channel.values():
         new_root.append(ch)
     print(f"📊 频道去重后: {len(norm_to_channel)} (原 {len(root.findall('channel'))})")
 
     # 2. 节目去重：按 (首选ID, 开始时间前12位) 分组，保留信息最全的一条
-    # 先收集所有节目，按组存储
     prog_groups = defaultdict(list)
     for prog in root.findall('programme'):
         orig_id = prog.get('channel')
@@ -116,34 +110,29 @@ def deduplicate_epg(xml_content):
         preferred_id = id_to_preferred.get(orig_id, orig_id)
         start = prog.get('start', '')
         if not start:
-            # 无开始时间，直接保留
             prog.set('channel', preferred_id)
             new_root.append(prog)
             continue
-        # 截取前12位（年-月-日 时:分）
         start_minute = start[:12] if len(start) >= 12 else start
         key = (preferred_id, start_minute)
         prog_groups[key].append(prog)
 
-    # 对每个组，保留信息最全的一条（优先选择有描述或副标题的）
     kept_count = 0
     for key, progs in prog_groups.items():
         if len(progs) == 1:
             best = progs[0]
         else:
-            # 选择信息最全的：优先有 desc，其次有 subtitle，其次最长标题，最后保留第一个
-            def score(prog):
+            def score(p):
                 s = 0
-                if prog.find('desc') is not None:
+                if p.find('desc') is not None:
                     s += 10
-                if prog.find('sub-title') is not None:
+                if p.find('sub-title') is not None:
                     s += 5
-                title = prog.find('title')
+                title = p.find('title')
                 if title is not None and title.text:
                     s += len(title.text)
                 return s
             best = max(progs, key=score)
-        # 更新频道ID为优选ID
         best.set('channel', key[0])
         new_root.append(best)
         kept_count += 1
@@ -157,13 +146,27 @@ def simple_timezone_fix(xml_content):
     return xml_content
 
 def save_data(content, filename):
+    """保存XML及压缩版本，并生成同名的.hash文件记录MD5"""
     os.makedirs('epg_data', exist_ok=True)
+    
+    # 计算哈希
+    content_bytes = content.encode('utf-8')
+    md5_hash = hashlib.md5(content_bytes).hexdigest()
+    
+    # 保存XML文件
     with open(f'epg_data/{filename}', 'w', encoding='utf-8') as f:
         f.write(content)
+    # 保存压缩版本
     with gzip.open(f'epg_data/{filename}.gz', 'wt', encoding='utf-8') as f:
         f.write(content)
-    size = len(content.encode('utf-8'))
-    print(f"💾 已保存: {filename} ({size/1024/1024:.2f} MB)")
+    
+    # 保存哈希文件（同名，后缀.hash）
+    hash_filename = f"{filename}.hash"
+    with open(f'epg_data/{hash_filename}', 'w', encoding='utf-8') as f:
+        f.write(md5_hash)
+    
+    print(f"💾 已保存: {filename} (大小: {len(content_bytes)/1024/1024:.2f} MB, MD5: {md5_hash})")
+    print(f"💾 哈希文件: {hash_filename}")
 
 def main():
     print("🚀 开始处理EPG数据...")
