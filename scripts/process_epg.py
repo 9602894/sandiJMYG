@@ -1,72 +1,180 @@
+#!/usr/bin/env python3
+import requests
+import xml.etree.ElementTree as ET
+import os
+import gzip
+from urllib.parse import quote
+import re
+
+# 可配置的后缀列表（用于去除频道名称末尾的修饰词）
+SUFFIXES = [
+    r'高清', r'HD', r'标清', r'高标清', r'付费', r'测试',
+    r'\-', r'_', r'\(高清\)', r'\[HD\]', r'（高清）', r'【HD】',
+    r'CCTV[- ]?(\d+)[ ]?高清',  # 例如 CCTV1高清 -> CCTV1
+]
+
+def safe_download(url):
+    try:
+        print(f"📥 下载: {url}")
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        r.encoding = 'utf-8'
+        return r.text
+    except Exception as e:
+        print(f"❌ 下载失败: {e}")
+        return None
+
+def fix_icon_url(root):
+    for ch in root.findall('channel'):
+        icon = ch.find('icon')
+        if icon is not None and 'src' in icon.attrib:
+            parts = icon.attrib['src'].split('/')
+            icon.attrib['src'] = '/'.join(quote(p) for p in parts)
+
+def fix_display_name(root):
+    for ch in root.findall('channel'):
+        for name in ch.findall('display-name'):
+            if name.text:
+                name.text = name.text.strip()
+
+def normalize_channel_name(name):
+    """强力归一化频道名称，去除清晰度、后缀、括号等，并统一CCTV格式"""
+    if not name:
+        return name
+    # 先去除括号及其内容（包括中英文括号）
+    name = re.sub(r'[（(].*?[）)]', '', name)
+    name = re.sub(r'[\[【].*?[\]】]', '', name)
+    # 替换 CCTV 格式，例如 "CCTV-1 高清" -> "CCTV-1"
+    name = re.sub(r'CCTV[- ]?(\d+)[ ]?(高清|HD)?', r'CCTV-\1', name, flags=re.IGNORECASE)
+    # 去除末尾常见后缀（顺序很重要，先去除带空格的，再去除不带空格的）
+    for suffix in SUFFIXES:
+        # 去除后缀前可能的空格、连字符、下划线
+        name = re.sub(r'[\s\-_]*' + suffix + r'[\s\-_]*$', '', name, flags=re.IGNORECASE)
+    # 去除首尾空白
+    name = name.strip()
+    return name
+
+def simple_merge(contents):
+    """简单合并所有源，不做任何去重"""
+    print("🔄 简单合并所有EPG数据（不去重）...")
+    merged_root = ET.Element('tv')
+    merged_root.set('source-info-name', 'JMYG Merged EPG (raw)')
+    merged_root.set('generator-info-name', 'JMYG Merger')
+    total_progs = 0
+    total_channels = 0
+    for src_name, content in contents:
+        try:
+            root = ET.fromstring(content)
+            fix_icon_url(root)
+            fix_display_name(root)
+            for ch in root.findall('channel'):
+                merged_root.append(ch)
+                total_channels += 1
+            for prog in root.findall('programme'):
+                merged_root.append(prog)
+                total_progs += 1
+            print(f"✅ 已合并 {src_name} (频道数: {len(root.findall('channel'))}, 节目数: {len(root.findall('programme'))})")
+        except Exception as e:
+            print(f"❌ 处理 {src_name} 出错: {e}")
+    print(f"📊 简单合并后总频道数: {total_channels}, 总节目数: {total_progs}")
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(merged_root, encoding='utf-8').decode()
+
 def deduplicate_epg(xml_content):
-    print("🔄 开始去重（频道归一化 + 选择最全频道）...")
+    """去重：频道归一化合并 + 节目按 (channel, start, end, title) 去重"""
+    print("🔄 开始强力去重...")
     root = ET.fromstring(xml_content)
     new_root = ET.Element('tv')
     new_root.set('source-info-name', 'JMYG Deduped EPG')
     new_root.set('generator-info-name', 'JMYG Deduper')
 
-    # 1. 收集所有频道及其节目（先找出每个频道关联的节目）
-    # 建立频道ID -> 频道元素 的映射
-    channel_map = {}
+    # 1. 频道归一化合并
+    norm_to_channel = {}   # 归一化名称 -> 首选频道元素
+    id_to_preferred = {}   # 原始频道ID -> 首选频道ID
     for ch in root.findall('channel'):
         cid = ch.get('id')
-        if cid:
-            channel_map[cid] = ch
-
-    # 建立频道ID -> 节目列表的映射
-    channel_progs = {}
-    for prog in root.findall('programme'):
-        cid = prog.get('channel')
-        if cid:
-            channel_progs.setdefault(cid, []).append(prog)
-
-    # 2. 按归一化名称分组
-    groups = {}  # norm_name -> list of (cid, channel_element, program_count)
-    for cid, ch in channel_map.items():
+        if not cid:
+            continue
         name_elem = ch.find('display-name')
         raw_name = name_elem.text.strip() if name_elem is not None and name_elem.text else cid
         norm_name = normalize_channel_name(raw_name)
-        progs = channel_progs.get(cid, [])
-        groups.setdefault(norm_name, []).append((cid, ch, len(progs)))
+        if norm_name not in norm_to_channel:
+            norm_to_channel[norm_name] = ch
+            id_to_preferred[cid] = cid
+        else:
+            preferred_ch = norm_to_channel[norm_name]
+            id_to_preferred[cid] = preferred_ch.get('id')
+        # 调试打印（可选）
+        # print(f"{raw_name} -> {norm_name}")
 
-    print(f"📊 归一化后频道组数: {len(groups)} (原始频道数: {len(channel_map)})")
-
-    # 3. 对每组选择节目数最多的频道
-    selected_channels = []  # 存放选中的频道元素
-    id_to_preferred = {}    # 原始ID -> 首选ID（选中的频道的ID）
-    for norm_name, items in groups.items():
-        # 按节目数降序，节目数相同则按源顺序（原顺序）
-        items.sort(key=lambda x: x[2], reverse=True)
-        best_cid, best_ch, best_count = items[0]
-        selected_channels.append(best_ch)
-        for cid, _, _ in items:
-            id_to_preferred[cid] = best_cid
-        print(f"   {norm_name}: 共 {len(items)} 个频道，选择 {best_cid} (节目数 {best_count})")
-
-    # 4. 将选中的频道加入新根
-    for ch in selected_channels:
+    # 添加去重后的频道
+    for ch in norm_to_channel.values():
         new_root.append(ch)
+    print(f"📊 频道去重后: {len(norm_to_channel)} (原 {len(root.findall('channel'))})")
 
-    # 5. 重新处理节目：只保留选中频道的节目，并去重（精确去重）
+    # 2. 节目去重（精确匹配 start, end, title）
     seen = set()
     total_kept = 0
     for prog in root.findall('programme'):
         orig_id = prog.get('channel')
         if not orig_id:
             continue
-        preferred_id = id_to_preferred.get(orig_id)
-        if not preferred_id:
-            continue  # 该频道未被选中，跳过
+        preferred_id = id_to_preferred.get(orig_id, orig_id)
         start = prog.get('start', '')
         end = prog.get('end', '')
         title_elem = prog.find('title')
         title = title_elem.text.strip() if title_elem is not None and title_elem.text else ''
+        # 使用去重键
         key = (preferred_id, start, end, title)
         if key not in seen:
             prog.set('channel', preferred_id)
             new_root.append(prog)
             seen.add(key)
             total_kept += 1
-
-    print(f"📊 最终频道数: {len(selected_channels)}, 最终节目数: {total_kept}")
+    print(f"📊 节目去重后: {total_kept} (原 {len(root.findall('programme'))})")
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(new_root, encoding='utf-8').decode()
+
+def simple_timezone_fix(xml_content):
+    if xml_content:
+        return xml_content.replace('+0000', '+0800').replace('UTC', '+0800')
+    return xml_content
+
+def save_data(content, filename):
+    os.makedirs('epg_data', exist_ok=True)
+    with open(f'epg_data/{filename}', 'w', encoding='utf-8') as f:
+        f.write(content)
+    with gzip.open(f'epg_data/{filename}.gz', 'wt', encoding='utf-8') as f:
+        f.write(content)
+    size = len(content.encode('utf-8'))
+    print(f"💾 已保存: {filename} ({size/1024/1024:.2f} MB)")
+
+def main():
+    print("🚀 开始处理EPG数据...")
+    raw_cn = safe_download('https://epg.pw/xmltv/epg_CN.xml')
+    raw_tw = safe_download('https://epg.pw/xmltv/epg_TW.xml')
+    raw_hk = safe_download('https://epg.pw/xmltv/epg_HK.xml')
+
+    cn = simple_timezone_fix(raw_cn)
+    tw = simple_timezone_fix(raw_tw)
+    hk = simple_timezone_fix(raw_hk)
+
+    sources = []
+    if cn: sources.append(('CN', cn))
+    if tw: sources.append(('TW', tw))
+    if hk: sources.append(('HK', hk))
+
+    if not sources:
+        print("❌ 所有源下载失败")
+        return
+
+    # 生成原始合并文件
+    merged_content = simple_merge(sources)
+    save_data(merged_content, 'epg_merged.xml')
+
+    # 生成去重后的文件
+    perfect_content = deduplicate_epg(merged_content)
+    save_data(perfect_content, 'epg_perfect.xml')
+
+    print("✅ 处理完成！")
+
+if __name__ == '__main__':
+    main()
