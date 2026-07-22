@@ -33,15 +33,13 @@ def fix_display_name(root):
 def normalize_channel_name(name):
     if not name:
         return name
-    # 去除末尾常见后缀
+    # 去除末尾常见后缀（高清、HD、标清等）
     name = re.sub(r'[\s\-_]+(高清|HD|标清|高标清|付费|测试)$', '', name, flags=re.IGNORECASE)
     name = re.sub(r'(高清|HD|标清|高标清|付费|测试)[\s\-_]*$', '', name, flags=re.IGNORECASE)
-    # 去除末尾空格或连字符
-    name = name.strip()
-    return name
+    return name.strip()
 
 def simple_merge(contents):
-    """简单合并多个源，不做任何去重"""
+    """简单合并所有源，不做任何去重"""
     print("🔄 简单合并所有EPG数据（不去重）...")
     merged_root = ET.Element('tv')
     merged_root.set('source-info-name', 'JMYG Merged EPG (raw)')
@@ -54,11 +52,10 @@ def simple_merge(contents):
             root = ET.fromstring(content)
             fix_icon_url(root)
             fix_display_name(root)
-            # 添加所有频道（不去重）
+            # 直接添加所有频道和节目
             for ch in root.findall('channel'):
                 merged_root.append(ch)
                 total_channels += 1
-            # 添加所有节目
             for prog in root.findall('programme'):
                 merged_root.append(prog)
                 total_progs += 1
@@ -69,16 +66,16 @@ def simple_merge(contents):
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(merged_root, encoding='utf-8').decode()
 
 def deduplicate_epg(xml_content):
-    """对合并后的XML进行去重：频道归一化合并，节目按(归一化频道, start)去重"""
-    print("🔄 开始去重...")
+    """对合并后的XML进行去重：频道归一化 + 节目精确去重 (start, end, title)"""
+    print("🔄 开始去重（频道归一化 + 节目精确去重）...")
     root = ET.fromstring(xml_content)
     new_root = ET.Element('tv')
     new_root.set('source-info-name', 'JMYG Deduped EPG')
     new_root.set('generator-info-name', 'JMYG Deduper')
     
-    # 1. 频道归一化去重（保留第一个出现的，即按原顺序）
-    norm_to_channel = {}   # 归一化名称 -> 频道元素
-    id_to_preferred = {}   # 原始ID -> 首选ID
+    # 1. 频道归一化合并（保留第一个出现的）
+    norm_to_channel = {}
+    id_to_preferred = {}
     for ch in root.findall('channel'):
         cid = ch.get('id')
         if not cid:
@@ -91,15 +88,14 @@ def deduplicate_epg(xml_content):
             id_to_preferred[cid] = cid
         else:
             preferred_ch = norm_to_channel[norm_name]
-            preferred_id = preferred_ch.get('id')
-            id_to_preferred[cid] = preferred_id
+            id_to_preferred[cid] = preferred_ch.get('id')
     
     # 添加去重后的频道
     for ch in norm_to_channel.values():
         new_root.append(ch)
     print(f"📊 频道去重后: {len(norm_to_channel)} (原 {len(root.findall('channel'))})")
     
-    # 2. 节目去重：按 (首选ID, start) 去重（忽略end和title，因为同一频道同一时间只有一个节目）
+    # 2. 节目精确去重 (channel, start, end, title)
     seen = set()
     total_kept = 0
     for prog in root.findall('programme'):
@@ -108,13 +104,10 @@ def deduplicate_epg(xml_content):
             continue
         preferred_id = id_to_preferred.get(orig_id, orig_id)
         start = prog.get('start', '')
-        if not start:
-            # 没有开始时间则保留
-            prog.set('channel', preferred_id)
-            new_root.append(prog)
-            total_kept += 1
-            continue
-        key = (preferred_id, start)
+        end = prog.get('end', '')
+        title_elem = prog.find('title')
+        title = title_elem.text.strip() if title_elem is not None and title_elem.text else ''
+        key = (preferred_id, start, end, title)
         if key not in seen:
             prog.set('channel', preferred_id)
             new_root.append(prog)
@@ -157,11 +150,11 @@ def main():
         print("❌ 所有源下载失败")
         return
     
-    # 1. 生成简单合并文件（不去重）
+    # 1. 生成原始合并文件（不去重）
     merged_content = simple_merge(sources)
     save_data(merged_content, 'epg_merged.xml')
     
-    # 2. 对合并后的内容进行去重，生成 perfect
+    # 2. 对合并内容进行去重，生成 perfect
     perfect_content = deduplicate_epg(merged_content)
     save_data(perfect_content, 'epg_perfect.xml')
     
