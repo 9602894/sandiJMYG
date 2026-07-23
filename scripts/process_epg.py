@@ -36,13 +36,10 @@ def normalize_channel_name(name):
     """强力归一化，去除清晰度、后缀、括号，统一CCTV格式"""
     if not name:
         return name
-    # 去除括号及其内容
     name = re.sub(r'[（(].*?[）)]', '', name)
     name = re.sub(r'[\[【].*?[\]】]', '', name)
-    # 统一CCTV格式：CCTV-1 综合、CCTV1、CCTV-1 高清 -> CCTV-1
     name = re.sub(r'CCTV[- ]?(\d+)[ ]?(综合|财经|综艺|体育|电影|电视剧|纪录|科教|戏曲|社会与法|新闻|少儿|音乐|奥林匹克|农业农村|高清)?', r'CCTV-\1', name, flags=re.IGNORECASE)
     name = re.sub(r'CCTV(\d+)', r'CCTV-\1', name, flags=re.IGNORECASE)
-    # 去除末尾常见后缀
     name = re.sub(r'[\s\-_]*(高清|HD|标清|高标清|付费|测试)[\s\-_]*$', '', name, flags=re.IGNORECASE)
     name = re.sub(r'[\s\-_]+$', '', name)
     return name.strip()
@@ -71,6 +68,31 @@ def simple_merge(contents):
             print(f"❌ 处理 {src_name} 出错: {e}")
     print(f"📊 简单合并后总频道数: {total_channels}, 总节目数: {total_progs}")
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(merged_root, encoding='utf-8').decode()
+
+def clean_unused_channels(xml_content):
+    """
+    删除所有没有节目引用的频道（即频道ID在任意programme的channel属性中未出现）。
+    同时保留所有节目（因为被保留的频道都有节目，不会产生无效引用）。
+    """
+    print("🧹 开始清理无节目频道...")
+    root = ET.fromstring(xml_content)
+    # 收集所有节目引用的 channel id
+    refs = set()
+    for prog in root.findall('programme'):
+        ch = prog.get('channel')
+        if ch:
+            refs.add(ch)
+    # 收集需要删除的频道
+    to_remove = []
+    for ch in root.findall('channel'):
+        cid = ch.get('id')
+        if cid and cid not in refs:
+            to_remove.append(ch)
+    # 执行删除
+    for ch in to_remove:
+        root.remove(ch)
+    print(f"🧹 删除了 {len(to_remove)} 个无节目频道，剩余频道数: {len(root.findall('channel'))}")
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding='utf-8').decode()
 
 def deduplicate_epg(xml_content):
     """高级去重：频道归一化合并 + 节目按(频道, 开始分钟)去重，保留信息最全的"""
@@ -149,18 +171,14 @@ def save_data(content, filename):
     """保存XML及压缩版本，并生成同名的.hash文件记录MD5"""
     os.makedirs('epg_data', exist_ok=True)
     
-    # 计算哈希
     content_bytes = content.encode('utf-8')
     md5_hash = hashlib.md5(content_bytes).hexdigest()
     
-    # 保存XML文件
     with open(f'epg_data/{filename}', 'w', encoding='utf-8') as f:
         f.write(content)
-    # 保存压缩版本
     with gzip.open(f'epg_data/{filename}.gz', 'wt', encoding='utf-8') as f:
         f.write(content)
     
-    # 保存哈希文件（同名，后缀.hash）
     hash_filename = f"{filename}.hash"
     with open(f'epg_data/{hash_filename}', 'w', encoding='utf-8') as f:
         f.write(md5_hash)
@@ -187,12 +205,16 @@ def main():
         print("❌ 所有源下载失败")
         return
 
-    # 生成原始合并文件（不去重）
+    # 1. 生成原始合并文件（不去重）
     merged_content = simple_merge(sources)
     save_data(merged_content, 'epg_merged.xml')
 
-    # 生成去重后的完美文件
-    perfect_content = deduplicate_epg(merged_content)
+    # 2. 清理无节目频道，生成清理后的合并文件（新增）
+    cleaned_content = clean_unused_channels(merged_content)
+    save_data(cleaned_content, 'epg_merged_clean.xml')
+
+    # 3. 基于清理后的数据进行去重，生成完美文件
+    perfect_content = deduplicate_epg(cleaned_content)   # 改为基于 cleaned_content
     save_data(perfect_content, 'epg_perfect.xml')
 
     print("✅ 处理完成！")
