@@ -3,7 +3,7 @@ import requests
 import xml.etree.ElementTree as ET
 import os
 import gzip
-from urllib.parse import quote
+from urllib.parse import quote, unquote  # 新增 unquote
 import re
 import hashlib
 from collections import defaultdict
@@ -20,11 +20,19 @@ def safe_download(url):
         return None
 
 def fix_icon_url(root):
+    """修正图标URL：解码编码字符，补全协议"""
     for ch in root.findall('channel'):
         icon = ch.find('icon')
         if icon is not None and 'src' in icon.attrib:
-            parts = icon.attrib['src'].split('/')
-            icon.attrib['src'] = '/'.join(quote(p) for p in parts)
+            raw = icon.attrib['src']
+            # 1. 解码可能存在的 %3A 等编码字符（如 https%3A// -> https://）
+            decoded = unquote(raw)
+            # 2. 如果以 // 开头，补全协议为 https:
+            if decoded.startswith('//'):
+                decoded = 'https:' + decoded
+            # 3. 如果既不是 http:// 也不是 https://，但可能以其他协议开头，保留原样（或可强制https）
+            #    这里不做强制，避免破坏非http协议（如ftp等）
+            icon.attrib['src'] = decoded
 
 def fix_display_name(root):
     for ch in root.findall('channel'):
@@ -55,7 +63,7 @@ def simple_merge(contents):
     for src_name, content in contents:
         try:
             root = ET.fromstring(content)
-            fix_icon_url(root)
+            fix_icon_url(root)      # 修正图标URL
             fix_display_name(root)
             for ch in root.findall('channel'):
                 merged_root.append(ch)
