@@ -3,7 +3,7 @@ import requests
 import xml.etree.ElementTree as ET
 import os
 import gzip
-from urllib.parse import quote, unquote  # 新增 unquote
+from urllib.parse import quote, unquote
 import re
 import hashlib
 from collections import defaultdict
@@ -25,13 +25,9 @@ def fix_icon_url(root):
         icon = ch.find('icon')
         if icon is not None and 'src' in icon.attrib:
             raw = icon.attrib['src']
-            # 1. 解码可能存在的 %3A 等编码字符（如 https%3A// -> https://）
             decoded = unquote(raw)
-            # 2. 如果以 // 开头，补全协议为 https:
             if decoded.startswith('//'):
                 decoded = 'https:' + decoded
-            # 3. 如果既不是 http:// 也不是 https://，但可能以其他协议开头，保留原样（或可强制https）
-            #    这里不做强制，避免破坏非http协议（如ftp等）
             icon.attrib['src'] = decoded
 
 def fix_display_name(root):
@@ -63,7 +59,7 @@ def simple_merge(contents):
     for src_name, content in contents:
         try:
             root = ET.fromstring(content)
-            fix_icon_url(root)      # 修正图标URL
+            fix_icon_url(root)
             fix_display_name(root)
             for ch in root.findall('channel'):
                 merged_root.append(ch)
@@ -84,19 +80,16 @@ def clean_unused_channels(xml_content):
     """
     print("🧹 开始清理无节目频道...")
     root = ET.fromstring(xml_content)
-    # 收集所有节目引用的 channel id
     refs = set()
     for prog in root.findall('programme'):
         ch = prog.get('channel')
         if ch:
             refs.add(ch)
-    # 收集需要删除的频道
     to_remove = []
     for ch in root.findall('channel'):
         cid = ch.get('id')
         if cid and cid not in refs:
             to_remove.append(ch)
-    # 执行删除
     for ch in to_remove:
         root.remove(ch)
     print(f"🧹 删除了 {len(to_remove)} 个无节目频道，剩余频道数: {len(root.findall('channel'))}")
@@ -176,21 +169,34 @@ def simple_timezone_fix(xml_content):
     return xml_content
 
 def save_data(content, filename):
-    """保存XML及压缩版本，并生成同名的.hash文件记录MD5"""
+    """
+    保存XML及压缩版本，并生成同名的.hash文件记录MD5。
+    若文件已存在且内容相同，则跳过保存，保持原有哈希不变。
+    """
     os.makedirs('epg_data', exist_ok=True)
-    
+    filepath = f'epg_data/{filename}'
+
+    # ★★★ 新增判断：如果文件已存在且内容完全相同，则跳过保存 ★★★
+    if os.path.exists(filepath):
+        with open(filepath, 'r', encoding='utf-8') as f:
+            existing = f.read()
+        if existing == content:
+            print(f"⏭️ 内容无变化，跳过保存: {filename}")
+            return  # 不覆盖文件，哈希文件保持不变
+
+    # 内容不同或文件不存在时，正常保存
     content_bytes = content.encode('utf-8')
     md5_hash = hashlib.md5(content_bytes).hexdigest()
-    
-    with open(f'epg_data/{filename}', 'w', encoding='utf-8') as f:
+
+    with open(filepath, 'w', encoding='utf-8') as f:
         f.write(content)
     with gzip.open(f'epg_data/{filename}.gz', 'wt', encoding='utf-8') as f:
         f.write(content)
-    
+
     hash_filename = f"{filename}.hash"
     with open(f'epg_data/{hash_filename}', 'w', encoding='utf-8') as f:
         f.write(md5_hash)
-    
+
     print(f"💾 已保存: {filename} (大小: {len(content_bytes)/1024/1024:.2f} MB, MD5: {md5_hash})")
     print(f"💾 哈希文件: {hash_filename}")
 
@@ -217,12 +223,12 @@ def main():
     merged_content = simple_merge(sources)
     save_data(merged_content, 'epg_merged.xml')
 
-    # 2. 清理无节目频道，生成清理后的合并文件（新增）
+    # 2. 清理无节目频道，生成清理后的合并文件
     cleaned_content = clean_unused_channels(merged_content)
     save_data(cleaned_content, 'epg_merged_clean.xml')
 
     # 3. 基于清理后的数据进行去重，生成完美文件
-    perfect_content = deduplicate_epg(cleaned_content)   # 改为基于 cleaned_content
+    perfect_content = deduplicate_epg(cleaned_content)
     save_data(perfect_content, 'epg_perfect.xml')
 
     print("✅ 处理完成！")
