@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 def fetch_kbro_epg(days=7):
     """
     从 Kbro API 抓取频道 906 的节目，转换为 XMLTV 格式。
-    返回完整的 XML 字符串（包含频道和节目），频道 ID 已改为 456841。
+    频道 ID 替换为 456841，节目包含 title, desc, date, audio 等完整标签。
     """
     print("📡 开始抓取 Kbro 频道 906 节目...")
     ssl._create_default_https_context = ssl._create_unverified_context
@@ -27,12 +27,11 @@ def fetch_kbro_epg(days=7):
         "Origin": "https://www.kbro.com.tw"
     }
 
-    # 创建根元素
     tv = ET.Element("tv")
     tv.set("generator-info-name", "Kbro EPG Grabber")
     tv.set("source-info-name", "Kbro")
 
-    # 添加频道（ID 改为 456841）
+    # 频道
     channel = ET.SubElement(tv, "channel", id="456841")
     display_name = ET.SubElement(channel, "display-name", lang="TW")
     display_name.text = "驚豔成人電影台"
@@ -58,13 +57,14 @@ def fetch_kbro_epg(days=7):
             if item.get("channelid") != "906":
                 continue
             prog_name = item.get("programname", "")
-            start_str = item.get("starttime", "")   # 格式: YYYYMMDDHHMMSS
+            start_str = item.get("starttime", "")   # YYYYMMDDHHMMSS
             end_str = item.get("endtime", "")
             desc_str = item.get("programdescr", "")
             if not start_str or not end_str:
                 continue
 
-            # 添加时区 +0800
+            prog_date = start_str[:8] if len(start_str) >= 8 else ""
+
             start_xml = start_str + " +0800"
             stop_xml = end_str + " +0800"
 
@@ -75,15 +75,25 @@ def fetch_kbro_epg(days=7):
                 start=start_xml,
                 stop=stop_xml
             )
+
             title = ET.SubElement(programme, "title", lang="zh")
             title.text = prog_name
+
             if desc_str:
                 desc = ET.SubElement(programme, "desc", lang="zh")
                 desc.text = desc_str
+
+            if prog_date:
+                date_elem = ET.SubElement(programme, "date")
+                date_elem.text = prog_date
+
+            audio = ET.SubElement(programme, "audio")
+            stereo = ET.SubElement(audio, "stereo")
+            stereo.text = "stereo"
+
             total_progs += 1
 
     print(f"   ✅ 共抓取 {total_progs} 个节目")
-    # 生成 XML 字符串
     xml_str = ET.tostring(tv, encoding="utf-8").decode()
     return '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_str
 
@@ -259,7 +269,7 @@ def save_data(content, filename):
     print(f"💾 已保存: {filename} (大小: {len(content_bytes)/1024/1024:.2f} MB, MD5: {md5_hash})")
     print(f"💾 哈希文件: {hash_filename}")
 
-# ===================== 主函数（修改） =====================
+# ===================== 主函数 =====================
 def main():
     print("🚀 开始处理EPG数据...")
 
@@ -272,8 +282,8 @@ def main():
     tw = simple_timezone_fix(raw_tw)
     hk = simple_timezone_fix(raw_hk)
 
-    # 2. 抓取 Kbro 频道 906 数据（新增）
-    kbro_xml = fetch_kbro_epg(days=7)  # 可调整天数
+    # 2. 抓取 Kbro 频道 906 数据
+    kbro_xml = fetch_kbro_epg(days=7)
 
     sources = []
     if cn: sources.append(('CN', cn))
@@ -288,7 +298,7 @@ def main():
     # 3. 简单合并
     merged_content = simple_merge(sources)
 
-    # 4. 替换 channel="456841" 的节目（用 Kbro 数据替换原有节目）
+    # 4. 替换频道 456841 的节目为 Kbro 抓取数据
     print("🔄 替换频道 456841 的节目为 Kbro 抓取数据...")
     root = ET.fromstring(merged_content)
 
