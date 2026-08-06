@@ -11,12 +11,8 @@ import ssl
 import json
 from datetime import datetime, timedelta
 
-# ===================== 新增：抓取 Kbro 频道 906 =====================
-def fetch_kbro_epg(days=7):
-    """
-    从 Kbro API 抓取频道 906 的节目，转换为 XMLTV 格式。
-    频道 ID 替换为 456841，节目包含 title, desc, date, audio 等完整标签。
-    """
+# ===================== 抓取 Kbro 节目数据（返回节目列表） =====================
+def fetch_kbro_programs(days=7):
     print("📡 开始抓取 Kbro 频道 906 节目...")
     ssl._create_default_https_context = ssl._create_unverified_context
     base_url = "https://epg.kbro.com.tw:2543/epg/epg_program.php"
@@ -27,19 +23,10 @@ def fetch_kbro_epg(days=7):
         "Origin": "https://www.kbro.com.tw"
     }
 
-    tv = ET.Element("tv")
-    tv.set("generator-info-name", "Kbro EPG Grabber")
-    tv.set("source-info-name", "Kbro")
-
-    # 频道
-    channel = ET.SubElement(tv, "channel", id="456841")
-    display_name = ET.SubElement(channel, "display-name", lang="TW")
-    display_name.text = "驚豔成人電影台"
-
+    programs = []
     start_date = datetime.now().date()
     date_list = [(start_date + timedelta(days=i)).strftime("%Y%m%d") for i in range(days)]
 
-    total_progs = 0
     for date_str in date_list:
         params["date"] = date_str
         try:
@@ -49,55 +36,56 @@ def fetch_kbro_epg(days=7):
         except Exception as e:
             print(f"   ⚠️ 抓取 {date_str} 失败: {e}")
             continue
-
         if not data or "PROG" not in data:
             continue
-
         for item in data["PROG"]:
             if item.get("channelid") != "906":
                 continue
             prog_name = item.get("programname", "")
-            start_str = item.get("starttime", "")   # YYYYMMDDHHMMSS
+            start_str = item.get("starttime", "")
             end_str = item.get("endtime", "")
             desc_str = item.get("programdescr", "")
             if not start_str or not end_str:
                 continue
-
             prog_date = start_str[:8] if len(start_str) >= 8 else ""
+            programs.append({
+                "title": prog_name,
+                "start": start_str + " +0800",
+                "stop": end_str + " +0800",
+                "desc": desc_str,
+                "date": prog_date
+            })
 
-            start_xml = start_str + " +0800"
-            stop_xml = end_str + " +0800"
+    print(f"   ✅ 共抓取 {len(programs)} 个节目")
+    return programs
 
-            programme = ET.SubElement(
-                tv,
-                "programme",
-                channel="456841",
-                start=start_xml,
-                stop=stop_xml
-            )
+# ===================== 生成格式化节目字符串（严格按模板） =====================
+def format_programs(programs):
+    """
+    生成节目文本，每个节目格式如下（缩进2空格，子标签4空格，无多余空行）：
+      <programme channel="456841" start="..." stop="...">
+        <title lang="zh">...</title>
+        <desc>...</desc>
+        <date>...</date>
+        <audio>
+          <stereo>stereo</stereo>
+        </audio>
+      </programme>
+    """
+    lines = []
+    for p in programs:
+        lines.append(f'  <programme channel="456841" start="{p["start"]}" stop="{p["stop"]}">')
+        lines.append(f'    <title lang="zh">{p["title"]}</title>')
+        if p["desc"]:
+            lines.append(f'    <desc>{p["desc"]}</desc>')
+        lines.append(f'    <date>{p["date"]}</date>')
+        lines.append('    <audio>')
+        lines.append('      <stereo>stereo</stereo>')
+        lines.append('    </audio>')
+        lines.append('  </programme>')
+    return '\n'.join(lines)
 
-            title = ET.SubElement(programme, "title", lang="zh")
-            title.text = prog_name
-
-            if desc_str:
-                desc = ET.SubElement(programme, "desc", lang="zh")
-                desc.text = desc_str
-
-            if prog_date:
-                date_elem = ET.SubElement(programme, "date")
-                date_elem.text = prog_date
-
-            audio = ET.SubElement(programme, "audio")
-            stereo = ET.SubElement(audio, "stereo")
-            stereo.text = "stereo"
-
-            total_progs += 1
-
-    print(f"   ✅ 共抓取 {total_progs} 个节目")
-    xml_str = ET.tostring(tv, encoding="utf-8").decode()
-    return '<?xml version="1.0" encoding="UTF-8"?>\n' + xml_str
-
-# ===================== 原脚本函数（未改动） =====================
+# ===================== 原有功能函数（不变） =====================
 def safe_download(url):
     try:
         print(f"📥 下载: {url}")
@@ -267,61 +255,46 @@ def save_data(content, filename):
     with open(f'epg_data/{hash_filename}', 'w', encoding='utf-8') as f:
         f.write(md5_hash)
     print(f"💾 已保存: {filename} (大小: {len(content_bytes)/1024/1024:.2f} MB, MD5: {md5_hash})")
-    print(f"💾 哈希文件: {hash_filename}")
 
 # ===================== 主函数 =====================
 def main():
     print("🚀 开始处理EPG数据...")
-
-    # 1. 下载 epg.pw 数据
     raw_cn = safe_download('https://epg.pw/xmltv/epg_CN.xml')
     raw_tw = safe_download('https://epg.pw/xmltv/epg_TW.xml')
     raw_hk = safe_download('https://epg.pw/xmltv/epg_HK.xml')
-
     cn = simple_timezone_fix(raw_cn)
     tw = simple_timezone_fix(raw_tw)
     hk = simple_timezone_fix(raw_hk)
 
-    # 2. 抓取 Kbro 频道 906 数据
-    kbro_xml = fetch_kbro_epg(days=7)
+    # 抓取 Kbro 节目列表
+    kbro_programs = fetch_kbro_programs(days=7)
+    if not kbro_programs:
+        print("⚠️ 未抓取到任何节目，退出")
+        return
+
+    # 生成格式化节目字符串（无多余空行，严格缩进）
+    new_programs_str = format_programs(kbro_programs)
 
     sources = []
     if cn: sources.append(('CN', cn))
     if tw: sources.append(('TW', tw))
     if hk: sources.append(('HK', hk))
-    if kbro_xml: sources.append(('KBRO', kbro_xml))
 
     if not sources:
-        print("❌ 所有源下载失败")
+        print("❌ 所有 epg.pw 源下载失败")
         return
 
-    # 3. 简单合并
+    # 合并所有源（不包含 Kbro，因为我们会单独替换）
     merged_content = simple_merge(sources)
 
-    # 4. 替换频道 456841 的节目为 Kbro 抓取数据
-    print("🔄 替换频道 456841 的节目为 Kbro 抓取数据...")
-    root = ET.fromstring(merged_content)
+    # 用正则替换所有 channel="456841" 的节目块
+    print("🔄 替换频道 456841 的节目...")
+    # 匹配从 <programme channel="456841" 到对应的 </programme>，包括中间的换行和缩进，非贪婪，匹配所有连续节目
+    pattern = r'(<programme channel="456841".*?</programme>\s*)+'
+    # 使用 re.DOTALL 让 . 匹配换行
+    merged_content = re.sub(pattern, new_programs_str + '\n', merged_content, flags=re.DOTALL)
+    print("   ✅ 替换完成")
 
-    # 删除所有原有 channel="456841" 的节目
-    to_remove = []
-    for prog in root.findall('programme'):
-        if prog.get('channel') == '456841':
-            to_remove.append(prog)
-    for prog in to_remove:
-        root.remove(prog)
-    print(f"   🗑️ 删除了 {len(to_remove)} 个原有节目")
-
-    # 从 kbro_xml 中提取节目并加入（频道已经存在）
-    if kbro_xml:
-        kbro_root = ET.fromstring(kbro_xml)
-        for prog in kbro_root.findall('programme'):
-            root.append(prog)
-        print(f"   ✅ 添加了 {len(kbro_root.findall('programme'))} 个新节目")
-
-    # 重新生成 merged_content
-    merged_content = '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding='utf-8').decode()
-
-    # 5. 后续处理
     save_data(merged_content, 'epg_merged.xml')
     cleaned_content = clean_unused_channels(merged_content)
     save_data(cleaned_content, 'epg_merged_clean.xml')
