@@ -10,6 +10,7 @@ from collections import defaultdict
 import ssl
 import json
 from datetime import datetime, timedelta
+from xml.sax.saxutils import escape   # 新增：用于转义XML特殊字符
 
 # ===================== 抓取 Kbro 节目数据（返回节目列表） =====================
 def fetch_kbro_programs(days=7):
@@ -74,10 +75,13 @@ def format_programs(programs):
     """
     lines = []
     for p in programs:
+        # 转义标题和描述中的特殊字符
+        title_esc = escape(p["title"])
+        desc_esc = escape(p["desc"]) if p["desc"] else ""
         lines.append(f'  <programme channel="456841" start="{p["start"]}" stop="{p["stop"]}">')
-        lines.append(f'    <title lang="zh">{p["title"]}</title>')
-        if p["desc"]:
-            lines.append(f'    <desc>{p["desc"]}</desc>')
+        lines.append(f'    <title lang="zh">{title_esc}</title>')
+        if desc_esc:
+            lines.append(f'    <desc>{desc_esc}</desc>')
         lines.append(f'    <date>{p["date"]}</date>')
         lines.append('    <audio>')
         lines.append('      <stereo>stereo</stereo>')
